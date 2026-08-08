@@ -182,3 +182,4 @@ WHERE Minutes > 0;
 SELECT Position, COUNT(*) as count, AVG(Minutes) as avg_mins 
 FROM epl_player_stats_24_25_per90 
 GROUP BY Position;
+
