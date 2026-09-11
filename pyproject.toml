@@ -1,0 +1,25 @@
+[project]
+name = "football-stats-thesis-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Stelios Palatidis", email = "stelios.palatidis@proton.me" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "flask>=3.1.3",
+    "flask-cors>=6.0.5",
+    "numpy>=2.5.3",
+    "pandas>=3.0.5",
+    "pymysql>=1.2.0",
+    "scikit-learn>=1.9.1",
+    "sqlalchemy>=2.0.52",
+]
+
+[project.scripts]
+football-stats-thesis-backend = "football_stats_thesis_backend:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
