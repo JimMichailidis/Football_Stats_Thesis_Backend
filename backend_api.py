@@ -2,10 +2,12 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine, false
+from sqlalchemy import create_engine
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics.pairwise import cosine_similarity
-
+import sys
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 #App & DB setup
 app = Flask(__name__)
@@ -26,10 +28,18 @@ NEGATIVE_METRICS = [
 ]
 
 
-#Helper functions
+#In Memory Cache
 
-def load_data() -> pd.DataFrame:
-    return pd.read_sql("SELECT * FROM epl_player_stats_24_25_per90", engine)
+DF_CACHE = None
+
+def load_data(force_reload: bool = False) -> pd.DataFrame:
+    global DF_CACHE
+    if DF_CACHE is None or force_reload:
+        print("🔄 Φόρτωση δεδομένων από τη MySQL στη μνήμη...")
+        DF_CACHE = pd.read_sql("SELECT * FROM epl_player_stats_24_25_per90", engine)
+        print(f"✅ Φορτώθηκαν επιτυχώς {len(DF_CACHE)} παίκτες.")
+
+    return DF_CACHE.copy()
 
 
 def clean_metrics(df: pd.DataFrame, metrics: list) -> pd.DataFrame:
@@ -52,21 +62,21 @@ def filter_positions(df: pd.DataFrame, positions: list, target: str) -> pd.DataF
 
 
 def compute_similarity(df: pd.DataFrame, metrics: list, target: str):
+    df = df.reset_index(drop=True)
     features = df[metrics].values
-    scaler   = MinMaxScaler()
-    scaled   = np.nan_to_num(scaler.fit_transform(features))
+    scaler = MinMaxScaler()
+    scaled = np.nan_to_num(scaler.fit_transform(features))
 
     #Normalized DataFrame για radar chart
     scaled_df = pd.DataFrame(scaled, columns=metrics, index=df.index)
     scaled_df['Player_Name'] = df['Player_Name'].values
 
     #Θέση target παίκτη
-    target_idx = df[df['Player_Name'] == target].index[0]
-    target_pos = df.index.get_loc(target_idx)
+    target_pos = df[df['Player_Name'] == target].index[0]
     target_vec = scaled[target_pos].reshape(1, -1)
 
-    sim_scores       = cosine_similarity(target_vec, scaled)[0]
-    df               = df.copy()
+    sim_scores = np.nan_to_num(cosine_similarity(target_vec, scaled)[0])
+    df = df.copy()
     df['similarity'] = sim_scores * 100
 
     return df, scaled_df
@@ -94,31 +104,51 @@ def build_radar_data(scaled_df: pd.DataFrame, metrics: list,
 @app.route('/recommend', methods=['POST'])
 def recommend():
     try:
-        data = request.json
+        data = request.get_json(silent=True)
 
+        if not data:
+            return jsonify({"error": "Invalid or empty JSON request"}), 400
+                
         target_player      = data.get('name')
         selected_metrics   = data.get('metrics')
         selected_positions = data.get('positions', [])
+        
+        if not target_player:
+            return jsonify({"error": "No player name provided"}), 400
 
-        #Φόρτωση & καθαρισμός
+        if not selected_metrics or not isinstance(selected_metrics, list):
+            return jsonify({"error": "Δεν επιλέχθηκαν έγκυρες μετρήσεις"}), 400
+
+        if not isinstance(selected_positions, list):
+            selected_positions = []
+
+        #Φόρτωση δεδομένων
         df = load_data()
+
+        #Φίλτρο ελάχιστων λεπτών συμμετοχής
+        min_minutes = data.get('min_minutes', 270)
+        mask_mins = (df['Minutes'] >= min_minutes) | (df['Player_Name'] == target_player)
+        df = df[mask_mins].copy()
 
         if target_player not in df['Player_Name'].values:
             return jsonify({"error": "Player not found"}), 400
 
-        if not selected_metrics:
-            return jsonify({"error": "No metrics selected"}), 400
-
+        #Έλεγχος αν τα metrics υπάρχουν στη βάση
+        invalid_metrics = [m for m in selected_metrics if m not in df.columns]
+        if invalid_metrics:
+            return jsonify({"error": f"Invalid metrics: {invalid_metrics}"}), 400
+        
+        #Καθαρισμός
         df = clean_metrics(df, selected_metrics)
 
-        #Φίλτρο θέσεων
-        df_filtered = filter_positions(df, selected_positions, target_player)
+        #Inversion αρνητικών metrics
+        df = invert_negative_metrics(df, selected_metrics)
 
-        #Inversion αρνητικών metrics (πριν το filter για σωστό max())
-        df_filtered = invert_negative_metrics(df_filtered, selected_metrics)
+        #Φίλτρο θέσεων
+        df = filter_positions(df, selected_positions, target_player)
 
         #Similarity + normalized values για radar
-        df_scored, scaled_df = compute_similarity(df_filtered, selected_metrics, target_player)
+        df_scored, scaled_df = compute_similarity(df, selected_metrics, target_player)
 
         #Top 5 (χωρίς τον target)
         top5 = (
@@ -153,7 +183,18 @@ def recommend():
         print(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/reload', methods=['POST', 'GET'])
+def reload_cache():
+    try:
+        df = load_data(force_reload=True)
+        return jsonify({
+            "message": "Η μνήμη ανανεώθηκε επιτυχώς!",
+            "total_players": len(df)
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 #Entry point
 if __name__ == '__main__':
-    app.run(port=5001, debug=false)
+    load_data()
+    app.run(port=5001, debug=False)
